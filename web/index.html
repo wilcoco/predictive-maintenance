@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>예방 보전 모니터</title>
+<script src="/static/vendor/chart.umd.js"></script>
+<style>
+  :root{
+    --bg:#0B1116; --panel:#101A22; --panel2:#0E161D; --edge:#1E2C36;
+    --txt:#E8EFF4; --muted:#7C8B97; --faint:#46555F;
+    --ok:#34D399; --warn:#F5A623; --alarm:#F2585B; --teal:#19B5B5; --line:#cfe8ee;
+    --mono:ui-monospace,"SF Mono","Roboto Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans KR",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+  a{color:inherit}
+  .wrap{max-width:1240px;margin:0 auto;padding:20px 20px 48px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;
+    padding-bottom:14px;border-bottom:1px solid var(--edge);flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:11px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 4px rgba(25,181,181,.15)}
+  h1{font-size:15px;font-weight:700;letter-spacing:.4px;margin:0}
+  h1 span{color:var(--muted);font-weight:500}
+  .src{font-size:11px;font-family:var(--mono);color:var(--faint);border:1px solid var(--edge);border-radius:5px;padding:3px 9px}
+
+  /* 요약 스트립 */
+  .summary{display:flex;gap:12px;margin:18px 0 6px;flex-wrap:wrap}
+  .stat{background:var(--panel);border:1px solid var(--edge);border-radius:11px;padding:13px 18px;min-width:120px}
+  .stat .n{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1}
+  .stat .l{font-size:11px;color:var(--muted);margin-top:6px;letter-spacing:.4px;display:flex;align-items:center;gap:6px}
+  .glyph{font-size:11px}
+
+  /* 그룹 헤더 */
+  .grp{margin:24px 0 10px;font-size:12px;letter-spacing:1px;color:var(--muted);text-transform:uppercase;font-weight:700}
+
+  /* 설비 카드 그리드 */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--edge);border-radius:13px;padding:16px;cursor:pointer;
+    transition:border-color .15s, transform .05s}
+  .card:hover{border-color:var(--teal)}
+  .card:active{transform:translateY(1px)}
+  .card.lv-ALARM{border-color:rgba(242,88,91,.5)} .card.lv-WARNING{border-color:rgba(245,166,35,.45)}
+  .card .row{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+  .card .name{font-size:14.5px;font-weight:700}
+  .card .devid{font-size:11px;color:var(--faint);font-family:var(--mono);margin-top:2px}
+  .card .val{font-family:var(--mono);font-size:34px;font-weight:600;line-height:1;margin:12px 0 2px}
+  .card .val .u{font-size:15px;color:var(--muted)}
+  .card .sub{font-size:11.5px;color:var(--muted);font-family:var(--mono)}
+  .spark{margin-top:10px;height:34px;width:100%}
+
+  /* 상태 칩 */
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-weight:700;
+    font-size:11.5px;letter-spacing:.3px;white-space:nowrap}
+  .chip .g{font-size:9px}
+  .lv-OK .chip,.chip.OK{background:rgba(52,211,153,.13);color:var(--ok)}
+  .lv-WARNING .chip,.chip.WARNING{background:rgba(245,166,35,.15);color:var(--warn)}
+  .lv-ALARM .chip,.chip.ALARM{background:rgba(242,88,91,.16);color:var(--alarm)}
+  .lv-NODATA .chip,.chip.NODATA{background:rgba(124,139,151,.13);color:var(--muted)}
+  .tag{font-size:10.5px;color:var(--muted);border:1px solid var(--edge);border-radius:5px;padding:2px 7px}
+  .flag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;margin-left:6px;
+    white-space:nowrap;display:inline-block}
+  .flag.drift{background:rgba(245,166,35,.14);color:var(--warn)}
+  .flag.dropout{background:rgba(242,88,91,.15);color:var(--alarm)}
+
+  /* 상세 */
+  .hidden{display:none}
+  .back{background:none;border:1px solid var(--edge);color:var(--muted);border-radius:7px;padding:6px 12px;
+    cursor:pointer;font-size:12.5px;font-family:var(--sans)}
+  .back:hover{border-color:var(--teal);color:var(--txt)}
+  .dhead{display:flex;align-items:center;gap:14px;margin:18px 0 4px;flex-wrap:wrap}
+  .dhead h2{margin:0;font-size:20px}
+  .dhead .devid{color:var(--faint);font-family:var(--mono);font-size:12px}
+  .banner{margin-top:14px;padding:11px 15px;border-radius:10px;font-size:13.5px;font-weight:600;display:none}
+  .banner.show{display:block}
+  .banner.WARNING{background:rgba(245,166,35,.12);color:var(--warn);border:1px solid rgba(245,166,35,.35)}
+  .banner.ALARM{background:rgba(242,88,91,.14);color:var(--alarm);border:1px solid rgba(242,88,91,.4)}
+
+  .top{display:grid;grid-template-columns:290px 1fr;gap:16px;margin-top:14px}
+  @media(max-width:820px){.top{grid-template-columns:1fr}}
+  .readout .label{font-size:11px;letter-spacing:1.4px;color:var(--muted);text-transform:uppercase}
+  .big{font-family:var(--mono);font-size:58px;font-weight:600;line-height:1;margin:10px 0 2px;letter-spacing:-1px}
+  .unit{font-size:20px;color:var(--muted)}
+  .meta{display:flex;gap:16px;margin-top:16px;flex-wrap:wrap}
+  .meta div{font-size:12px;color:var(--muted)}
+  .meta b{display:block;font-family:var(--mono);font-size:17px;color:var(--txt);font-weight:600;margin-top:3px}
+  .meta .vbase b{color:var(--teal)} .meta .vsoft b{color:var(--warn)} .meta .vhard b{color:var(--alarm)}
+
+  .chart-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap}
+  .chart-head h3{font-size:13px;margin:0;color:var(--muted);font-weight:600;letter-spacing:.4px}
+  .ranges{display:flex;gap:6px}
+  .rng{background:var(--panel2);border:1px solid var(--edge);color:var(--muted);border-radius:6px;padding:4px 10px;
+    font-size:11.5px;cursor:pointer}
+  .rng.on{border-color:var(--teal);color:var(--txt)}
+  .legend{display:flex;gap:14px;font-size:11px;color:var(--muted)}
+  .legend i{display:inline-block;width:14px;height:0;border-top:2px dashed;vertical-align:middle;margin-right:4px}
+  .chart-box{position:relative;height:320px}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--faint);font-weight:600;font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;
+    padding:0 10px 8px;border-bottom:1px solid var(--edge)}
+  td{padding:10px;border-bottom:1px solid var(--panel2);font-family:var(--mono);color:var(--muted);vertical-align:top}
+  td.lv.WARNING{color:var(--warn);font-weight:700} td.lv.ALARM{color:var(--alarm);font-weight:700}
+  .kind{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;background:var(--panel2);color:var(--muted)}
+  .empty{color:var(--faint);padding:16px 10px;font-size:13px}
+
+  details.cfg{margin-top:16px;background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:4px 16px}
+  details.cfg summary{cursor:pointer;padding:12px 0;font-size:13px;color:var(--muted);font-weight:600}
+  .form{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;padding:8px 0 16px}
+  .form label{font-size:11px;color:var(--muted);display:block}
+  .form input,.form select{width:100%;margin-top:5px;background:var(--panel2);border:1px solid var(--edge);
+    color:var(--txt);border-radius:6px;padding:7px 9px;font-size:13px;font-family:var(--mono)}
+  .save{background:var(--teal);border:none;color:#04201f;font-weight:700;border-radius:7px;padding:8px 16px;
+    cursor:pointer;font-size:12.5px;margin-bottom:14px}
+  .save:disabled{opacity:.5}
+  .card-panel{background:var(--panel);border:1px solid var(--edge);border-radius:13px;padding:18px;margin-top:16px}
+  .foot{margin-top:24px;font-size:11px;color:var(--faint);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="dot"></span>
+      <h1>예방 보전 모니터 <span>· 비침습 부하 추세</span></h1></div>
+    <span class="src" id="src">연결 확인 중…</span>
+  </header>
+
+  <!-- ===== 오버뷰 ===== -->
+  <section id="overview">
+    <div class="summary" id="summary"></div>
+    <div id="groups"></div>
+  </section>
+
+  <!-- ===== 설비 상세 ===== -->
+  <section id="detail" class="hidden">
+    <div style="margin-top:16px"><button class="back" id="back">← 전체 설비</button></div>
+    <div class="dhead">
+      <h2 id="dname">—</h2><span class="devid" id="ddevid"></span>
+      <span class="tag" id="dgrp"></span>
+      <span id="dflags"></span>
+    </div>
+    <div class="banner" id="banner"></div>
+
+    <div class="top">
+      <div class="card-panel readout">
+        <div class="label">실시간</div>
+        <div class="big" id="cur">—<span class="unit"> </span></div>
+        <div id="dstatus"></div>
+        <div class="meta">
+          <div class="vbase">베이스라인<b id="vbase">—</b></div>
+          <div class="vsoft">소프트<b id="vsoft">—</b></div>
+          <div class="vhard">하드<b id="vhard">—</b></div>
+          <div class="vdrift">드리프트<b id="vdrift">—</b></div>
+        </div>
+      </div>
+      <div class="card-panel">
+        <div class="chart-head">
+          <h3>부하 추세</h3>
+          <div class="ranges" id="ranges">
+            <button class="rng" data-m="30">30분</button>
+            <button class="rng on" data-m="60">1시간</button>
+            <button class="rng" data-m="180">3시간</button>
+            <button class="rng" data-m="720">12시간</button>
+          </div>
+          <div class="legend">
+            <span><i style="border-color:var(--teal)"></i>베이스라인</span>
+            <span><i style="border-color:var(--warn)"></i>소프트</span>
+            <span><i style="border-color:var(--alarm)"></i>하드</span>
+          </div>
+        </div>
+        <div class="chart-box"><canvas id="chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card-panel">
+      <h3 style="font-size:13px;color:var(--muted);margin:0 0 10px">경고 이력</h3>
+      <table><thead><tr><th>시각</th><th>유형</th><th>레벨</th><th>값</th><th>비고</th></tr></thead>
+        <tbody id="alertRows"><tr><td class="empty" colspan="5">경고 이력 없음</td></tr></tbody></table>
+    </div>
+
+    <details class="cfg">
+      <summary>임계값 / 탐지 설정 편집</summary>
+      <div class="form" id="cfgForm"></div>
+      <button class="save" id="saveCfg">저장</button>
+    </details>
+  </section>
+
+  <div class="foot" id="foot">
+    베이스라인 = 가동(running) 샘플 중앙값(드리프트 추적) · 소프트 = 조기경보선(하드 아래) ·
+    드롭아웃 = 가동 중 급락(단선·급정지) 감지. 외부 도구가 <code>POST /ingest</code> 로 측정값을 넣습니다.
+  </div>
+</div>
+
+<script>
+const POLL_MS = 4000;
+let VIEW = "overview", DEV = null, RANGE = 60, chart = null, timer = null;
+const GLYPH = {OK:"●", WARNING:"▲", ALARM:"■", NODATA:"·"};
+const KO = {OK:"정상", WARNING:"경고", ALARM:"알람", NODATA:"데이터 없음"};
+const $ = s => document.querySelector(s);
+
+const fmtHM = ts => {const d=new Date(ts*1000);
+  return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");};
+const fmtFull = ts => {const d=new Date(ts*1000);
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")
+    +" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")
+    +":"+String(d.getSeconds()).padStart(2,"0");};
+const num = (v,d=2) => (v==null||isNaN(v)) ? "—" : (+v).toFixed(d);
+
+function chipHTML(level){
+  return `<span class="chip ${level}"><span class="g">${GLYPH[level]||"·"}</span>${KO[level]||level}</span>`;
+}
+function sparkSVG(vals, color){
+  const w=252,h=34,p=3; if(!vals||vals.length<2) return "";
+  const mn=Math.min(...vals), mx=Math.max(...vals), rng=(mx-mn)||1;
+  const pts=vals.map((v,i)=>{
+    const x=p+(w-2*p)*i/(vals.length-1);
+    const y=h-p-(h-2*p)*(v-mn)/rng; return x.toFixed(1)+","+y.toFixed(1);}).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"
+      stroke-linejoin="round" stroke-linecap="round" opacity=".9"/></svg>`;
+}
+
+// ---------------- 오버뷰 ----------------
+async function loadOverview(){
+  let devs;
+  try{ devs = await fetch("/api/devices").then(r=>{if(!r.ok)throw 0;return r.json();}); }
+  catch(e){ $("#src").textContent="◆ 백엔드 미연결"; return; }
+  $("#src").textContent="● 라이브 · "+devs.length+"개 설비";
+
+  const cnt={OK:0,WARNING:0,ALARM:0,NODATA:0};
+  devs.forEach(d=>cnt[d.level]=(cnt[d.level]||0)+1);
+  $("#summary").innerHTML = [
+    ["설비 수", devs.length, "var(--txt)", null],
+    ["정상", cnt.OK||0, "var(--ok)", "OK"],
+    ["경고", cnt.WARNING||0, "var(--warn)", "WARNING"],
+    ["알람", cnt.ALARM||0, "var(--alarm)", "ALARM"],
+  ].map(([l,n,c,lv])=>`<div class="stat"><div class="n" style="color:${c}">${n}</div>
+     <div class="l">${lv?`<span class="glyph" style="color:${c}">${GLYPH[lv]}</span>`:""}${l}</div></div>`).join("");
+
+  const groups={};
+  devs.forEach(d=>{(groups[d.grp]=groups[d.grp]||[]).push(d);});
+  const color = lv => lv==="ALARM"?"var(--alarm)":lv==="WARNING"?"var(--warn)":lv==="NODATA"?"var(--muted)":"var(--ok)";
+  $("#groups").innerHTML = Object.keys(groups).map(g=>`
+    <div class="grp">${g}</div>
+    <div class="grid">${groups[g].map(d=>`
+      <div class="card lv-${d.level}" data-dev="${encodeURIComponent(d.device)}">
+        <div class="row">
+          <div><div class="name">${d.label}</div><div class="devid">${d.device}</div></div>
+          ${chipHTML(d.level)}
+        </div>
+        <div class="val" style="color:${d.level==="OK"||d.level==="NODATA"?"var(--txt)":color(d.level)}">
+          ${num(d.irms)}<span class="u"> ${d.unit}</span></div>
+        <div class="sub">기준 ${num(d.baseline)} · soft ${num(d.soft,1)} · hard ${num(d.hard,1)}
+          ${d.drift?`<span class="flag drift">드리프트 +${d.drift_pct}%</span>`:""}
+          ${d.dropout?`<span class="flag dropout">드롭아웃</span>`:""}</div>
+        ${sparkSVG(d.spark, color(d.level))}
+      </div>`).join("")}</div>`).join("");
+
+  document.querySelectorAll(".card").forEach(el=>
+    el.onclick=()=>openDevice(decodeURIComponent(el.dataset.dev)));
+}
+
+// ---------------- 상세 ----------------
+const thrPlugin = {id:"thr", afterDatasetsDraw(c){
+  const {ctx,chartArea:a,scales:{y}}=c, L=c.$thr||{};
+  const line=(v,col)=>{if(v==null)return;const yy=y.getPixelForValue(v);
+    if(yy<a.top||yy>a.bottom)return; ctx.save();ctx.strokeStyle=col;ctx.lineWidth=1.4;ctx.setLineDash([6,5]);
+    ctx.beginPath();ctx.moveTo(a.left,yy);ctx.lineTo(a.right,yy);ctx.stroke();ctx.restore();};
+  line(L.baseline,"#19B5B5");line(L.soft,"#F5A623");line(L.hard,"#F2585B");
+}};
+const crosshair = {id:"cross", afterDraw(c){
+  if(!c.tooltip?._active?.length)return; const x=c.tooltip._active[0].element.x, a=c.chartArea;
+  c.ctx.save();c.ctx.strokeStyle="rgba(207,232,238,.25)";c.ctx.lineWidth=1;
+  c.ctx.beginPath();c.ctx.moveTo(x,a.top);c.ctx.lineTo(x,a.bottom);c.ctx.stroke();c.ctx.restore();
+}};
+
+function ensureChart(){
+  if(chart) return true;
+  if(typeof Chart === "undefined") return false;   // 차트 미로드 시에도 나머지 UI는 살린다
+  chart = new Chart($("#chart"),{
+    type:"line",
+    data:{datasets:[{label:"부하",data:[],borderColor:"#cfe8ee",borderWidth:2,tension:.25,
+      pointRadius:0,pointHoverRadius:4,fill:true,
+      backgroundColor:ctx=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,320);
+        g.addColorStop(0,"rgba(207,232,238,.16)");g.addColorStop(1,"rgba(207,232,238,0)");return g;}}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,
+      parsing:{xAxisKey:"x",yAxisKey:"y"},
+      interaction:{mode:"index",intersect:false},
+      scales:{
+        x:{type:"linear",ticks:{color:"#46555F",maxTicksLimit:7,callback:v=>fmtHM(v/1000)},
+           grid:{color:"#16222B"}},
+        y:{ticks:{color:"#46555F"},grid:{color:"#16222B"},
+           title:{display:true,text:"부하",color:"#46555F",font:{size:11}}}},
+      plugins:{legend:{display:false},
+        tooltip:{callbacks:{title:it=>fmtFull(it[0].parsed.x/1000),
+          label:it=>" "+it.parsed.y.toFixed(2)}}}},
+    plugins:[thrPlugin, crosshair]
+  });
+  return true;
+}
+
+async function loadDetail(){
+  if(!DEV) return;
+  let st,rd,al;
+  try{
+    [st,rd,al]=await Promise.all([
+      fetch(`/api/status?device=${encodeURIComponent(DEV)}`).then(r=>r.json()),
+      fetch(`/api/readings?device=${encodeURIComponent(DEV)}&minutes=${RANGE}`).then(r=>r.json()),
+      fetch(`/api/alerts?device=${encodeURIComponent(DEV)}`).then(r=>r.json()),
+    ]);
+  }catch(e){ return; }
+
+  $("#dname").textContent = st.label||DEV;
+  $("#ddevid").textContent = DEV;
+  $("#dgrp").textContent = st.grp||"";
+  $("#dflags").innerHTML =
+    (st.drift?`<span class="flag drift">드리프트 +${st.drift_pct}%</span>`:"")+
+    (st.dropout?`<span class="flag dropout">드롭아웃</span>`:"");
+  $("#cur").innerHTML = num(st.irms)+`<span class="unit"> ${st.unit||""}</span>`;
+  $("#dstatus").innerHTML = chipHTML(st.level);
+  $("#vbase").textContent = num(st.baseline);
+  $("#vsoft").textContent = num(st.soft,1);
+  $("#vhard").textContent = num(st.hard,1);
+  $("#vdrift").textContent = (st.drift_pct>=0?"+":"")+st.drift_pct+"%";
+
+  const b=$("#banner");
+  if(st.level==="ALARM"){b.className="banner show ALARM";
+    b.textContent="⚠ 하드 트립 임계 도달 — 즉시 점검 필요. 라인 정지 위험.";}
+  else if(st.level==="WARNING"){b.className="banner show WARNING";
+    b.textContent="▲ 소프트 경고선 초과 — 부하 추세 상승 중. 알람 전에 계획 점검 권장.";}
+  else b.className="banner";
+
+  if(ensureChart()){
+    chart.$thr={baseline:st.baseline,soft:st.soft,hard:st.hard};
+    chart.data.datasets[0].data = rd.map(p=>({x:p.ts*1000,y:p.irms}));
+    const ys=rd.map(p=>p.irms).concat([st.hard,st.baseline].filter(v=>v!=null));
+    if(ys.length){chart.options.scales.y.suggestedMin=Math.max(0,Math.min(...ys)-2);
+      chart.options.scales.y.suggestedMax=Math.max(...ys)+2;}
+    chart.options.scales.y.title.text = st.unit||"부하";
+    chart.update();
+  }
+
+  const tb=$("#alertRows");
+  tb.innerHTML = al.length ? al.map(a=>`<tr>
+    <td>${fmtFull(a.ts)}</td><td><span class="kind">${a.kind}</span></td>
+    <td class="lv ${a.level}">${a.level}</td><td>${num(a.irms)}</td><td>${a.note||""}</td></tr>`).join("")
+    : `<tr><td class="empty" colspan="5">경고 이력 없음</td></tr>`;
+}
+
+async function loadConfigForm(){
+  const cfg = await fetch(`/api/config?device=${encodeURIComponent(DEV)}`).then(r=>r.json());
+  const f = [
+    ["label","이름","text"],["grp","그룹","select"],["unit","단위","text"],
+    ["nominal","nominal","num"],["soft","soft","num"],["hard","hard","num"],
+    ["idle_floor","idle_floor (정지판정)","num"],["baseline_n","baseline_n (창)","num"],
+    ["drift_pct","drift_pct (예:0.15)","num"],["dropout_enable","dropout(1/0)","num"],
+  ];
+  $("#cfgForm").innerHTML = f.map(([k,l,t])=>{
+    if(t==="select"){const opts=["도장","사출","유틸","기타"];
+      return `<label>${l}<select data-k="${k}">${opts.map(o=>
+        `<option ${cfg[k]===o?"selected":""}>${o}</option>`).join("")}</select></label>`;}
+    return `<label>${l}<input data-k="${k}" type="${t==="num"?"number":"text"}" step="any"
+      value="${cfg[k]??""}"></label>`;}).join("");
+}
+$("#saveCfg").onclick = async ()=>{
+  const body={device:DEV};
+  document.querySelectorAll("#cfgForm [data-k]").forEach(el=>{
+    let v=el.value; if(el.type==="number") v=v===""?null:+v; body[el.dataset.k]=v;});
+  $("#saveCfg").disabled=true;
+  await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  $("#saveCfg").disabled=false; loadDetail();
+};
+
+function openDevice(dev){
+  DEV=dev; VIEW="detail";
+  $("#overview").classList.add("hidden"); $("#detail").classList.remove("hidden");
+  window.scrollTo(0,0); loadConfigForm(); loadDetail(); schedule();
+}
+function goOverview(){
+  VIEW="overview"; DEV=null;
+  $("#detail").classList.add("hidden"); $("#overview").classList.remove("hidden");
+  loadOverview(); schedule();
+}
+$("#back").onclick=goOverview;
+document.querySelectorAll(".rng").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".rng").forEach(x=>x.classList.remove("on"));
+  b.classList.add("on"); RANGE=+b.dataset.m; loadDetail();});
+
+function tick(){ VIEW==="overview" ? loadOverview() : loadDetail(); }
+function schedule(){ clearInterval(timer); timer=setInterval(tick, POLL_MS); }
+
+goOverview();
+</script>
+</body>
+</html>
