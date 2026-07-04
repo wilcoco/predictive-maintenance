@@ -28,6 +28,18 @@ def _emit(c, device, ts, kind, level, irms, note, notify=True):
         _notify(f"[예방보전] {device} · {kind}/{level} · {irms:.2f} — {note}")
 
 
+def _learn(c, device, cfg, run_vals, ts, notify):
+    """정상치 자동학습: 충분한 running 샘플이 모이면 nominal/soft/hard 확정."""
+    import statistics
+    med = round(statistics.median(run_vals), 3)
+    patch = dict(nominal=med, soft=round(med * 1.2, 3), hard=round(med * 1.5, 3), learn=0)
+    cfg.update(patch)
+    db.set_config(c, device, patch)
+    _emit(c, device, ts, "LEARN", "OK", med,
+          f"정상치 자동학습 완료 — nominal={med}, soft={patch['soft']}, hard={patch['hard']} "
+          f"(hard 는 임시값, 실제 트립값 확인 후 보정 권장)", notify)
+
+
 def process_reading(c, device, ts, irms, notify=True):
     db.ensure_config(c, device)
     c.execute("INSERT INTO readings(device,ts,irms) VALUES(?,?,?)", (device, ts, irms))
@@ -37,15 +49,30 @@ def process_reading(c, device, ts, irms, notify=True):
     st = db.get_state(c, device)
 
     running = irms > cfg["idle_floor"]
-    level_state, drift_state, dropout_state = st["level"], st["drift"], st["dropout"]
+    run_vals = detect.running_values(window, cfg["idle_floor"])
+    level_state, drift_state, dropout_state, cusum_state = \
+        st["level"], st["drift"], st["dropout"], st["cusum"]
 
     if running:
-        # 가동 중일 때만 건강 레벨을 판정한다.
-        # (정지 구간에 상태를 리셋하면, 재가동마다 경고가 재발되는 스팸이 생김)
-        new_level = detect.classify(irms, ev["baseline"], cfg, st["level"])  # 추세 기반 + 디바운스
-        # 1) 절대 레벨 악화 (OK→WARNING→ALARM) 전이에만 기록
+        # 0) 학습모드: 정상치가 충분히 모이면 임계 자동 확정
+        if cfg.get("learn") and len(run_vals) >= int(cfg["baseline_n"]):
+            _learn(c, device, cfg, run_vals, ts, notify)
+
+        # 1) 선택된 방식으로 추세 경고 판정 (히스테리시스 포함)
+        prev_warn = st["level"] in ("WARNING", "ALARM")
+        warn, cusum_state, info = detect.trend_state(
+            cfg, ev["baseline"], run_vals, prev_warn, st["cusum"])
+        # 2) 레벨: ALARM=순간 피크(안전), WARNING=추세 경고
+        if irms >= cfg["hard"] or (st["level"] == "ALARM" and irms >= cfg["hard"] * (1 - detect.HYSTERESIS)):
+            new_level = "ALARM"
+        elif warn:
+            new_level = "WARNING"
+        else:
+            new_level = "OK"
+
+        # 3) 악화 전이에만 기록
         if detect.LEVEL_RANK.get(new_level, 0) > detect.LEVEL_RANK.get(st["level"], 0):
-            note = f"임계 초과 (soft={cfg['soft']}, hard={cfg['hard']})"
+            note = _reason(cfg, ev, info)
             if new_level == "ALARM":
                 w = c.execute(
                     "SELECT ts FROM alerts WHERE device=? AND level='WARNING' AND ts<=? "
@@ -54,22 +81,27 @@ def process_reading(c, device, ts, irms, notify=True):
                     note += f" · 경고 후 {(ts - w['ts'])/60.0:.0f}분 만에 알람 (리드타임)"
             _emit(c, device, ts, "LEVEL", new_level, irms, note, notify)
         level_state = new_level
-
-        # 2) 드리프트 진입 (한 번만)
-        if ev["drift"] and not st["drift"]:
-            _emit(c, device, ts, "DRIFT", "WARNING", irms,
-                  f"베이스라인 {ev['baseline']} — nominal 대비 +{ev['drift_ratio']*100:.0f}% 상승 추세", notify)
         drift_state = ev["drift"]
         dropout_state = False  # 가동 재개 = 드롭아웃 해제
     else:
-        # 정지 중: 레벨·드리프트는 보존. 드롭아웃(단선/급정지)만 이 순간에 판정.
+        # 정지 중: 레벨·추세·CUSUM 보존. 드롭아웃만 이 순간에 판정.
         if ev["dropout"] and not st["dropout"]:
             _emit(c, device, ts, "DROPOUT", "ALARM", irms,
                   "가동 중 신호 급락 — 단선/급정지 의심", notify)
-        # 재가동 전까지 래치 — 죽은 설비가 정상(OK)으로 보이지 않게
         dropout_state = st["dropout"] or ev["dropout"]
         if dropout_state:
             level_state = "ALARM"
 
-    db.set_state(c, device, level_state, drift_state, dropout_state)
+    db.set_state(c, device, level_state, drift_state, dropout_state, cusum_state)
     return ev
+
+
+def _reason(cfg, ev, info):
+    m = cfg.get("method", "absolute")
+    if m == "cusum":
+        return f"CUSUM {info.get('cusum')} > {info.get('cusum_h')} — 지속 상승 추세 (베이스라인 {ev['baseline']})"
+    if m == "zscore":
+        return f"로버스트 z={info.get('z')} ≥ {cfg['z_k']} — 정상분포 이탈 (베이스라인 {ev['baseline']})"
+    if m == "drift":
+        return f"베이스라인 {ev['baseline']} — nominal 대비 +{ev['drift_ratio']*100:.0f}% (임계 {cfg['drift_pct']*100:.0f}%)"
+    return f"베이스라인 {ev['baseline']} ≥ soft {cfg['soft']}"

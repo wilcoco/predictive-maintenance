@@ -77,13 +77,30 @@ curl -X POST http://localhost:8000/ingest \
 ## 판정 로직
 
 - **베이스라인** = `idle_floor` 초과(=가동 중) 샘플의 중앙값 → 정지/대기 전류를 섞지 않는다(상태 게이팅).
-- **레벨(절대)**: `OK` / `WARNING`(≥ soft) / `ALARM`(≥ hard). 하드는 고정 안전망.
-- **드리프트**: 베이스라인이 `nominal` 대비 `drift_pct` 이상 상승 → 점진 열화 조기경보.
-- **드롭아웃**: 가동 중이던 신호가 급락(< idle_floor) → 단선·급정지(히터밴드 등 급사형).
+- **레벨**: `ALARM` = 순간 전류 ≥ hard(안전 트립). `WARNING` = 아래 선택된 추세 방식이 발동. `OK` = 그 외.
+  진입/이탈에 히스테리시스, 베이스라인이 설 때까지 워밍업 보류 → 채터링·초기 오탐 방지.
+- **드롭아웃**: 가동 중이던 신호가 급락(< idle_floor) → 단선·급정지(히터밴드 등 급사형). 재가동 전까지 래치.
 - 상태가 **악화될 때만 1건** 기록(스팸 방지). ALARM 기록 시 직전 WARNING과의 **리드타임**을 함께 남김.
 
-설정 항목: `nominal, soft, hard, idle_floor, baseline_n(창), drift_pct, dropout_enable, label, grp, unit`.
-신품 교체 직후 정상치를 며칠 로깅한 뒤 `/api/config`로 보정하는 것을 권장.
+### 추세 탐지 방식 (`method`, 설비별 선택)
+
+| 방식 | 언제 | 원리 |
+|---|---|---|
+| `absolute` | 기본·직관 | 베이스라인 ≥ soft |
+| `drift` | 점진 열화 | 베이스라인 ≥ nominal×(1+`drift_pct`) — 상대 상승률 |
+| `cusum` | 조기감지·노이즈 | 누적합 S > `cusum_h`·σ — 작지만 지속되는 상승을 가장 빨리 |
+| `zscore` | 노이즈 큰 신호 | 로버스트 z(중앙값+MAD) ≥ `z_k` — 정상분포 이탈 |
+
+**자동학습**(`learn=1`): 정상치를 모를 때, running 샘플이 충분히 쌓이면 `nominal/soft/hard`를 자동 확정.
+
+### 설정 마법사 (권장 진입점)
+
+대시보드의 **＋ 설비 설정 마법사** 버튼 → 설비의 성격을 묻는 5개 질문(고장 방식·가동 패턴·
+신호 노이즈·정상치 인지 여부·트립값)에 답하면 **적합한 탐지 방식과 임계치를 자동 추천·설정**한다.
+통계 지식 없이 현장 담당이 바로 세팅 가능. 세부값은 상세 화면의 "설정 편집"에서 언제든 수동 조정.
+
+설정 항목 전체: `label, grp, unit, nominal, soft, hard, idle_floor, baseline_n, drift_pct,
+dropout_enable, method, cusum_k, cusum_h, z_k, learn`.
 
 ## 구조
 

@@ -116,6 +116,46 @@
   .save:disabled{opacity:.5}
   .card-panel{background:var(--panel);border:1px solid var(--edge);border-radius:13px;padding:18px;margin-top:16px}
   .foot{margin-top:24px;font-size:11px;color:var(--faint);line-height:1.6}
+
+  /* 설정 마법사 */
+  .toolbar{display:flex;justify-content:flex-end;margin:14px 0 -4px}
+  .wz-open{background:var(--teal);border:none;color:#04201f;font-weight:700;border-radius:8px;
+    padding:9px 15px;cursor:pointer;font-size:12.5px}
+  .wz-open.ghost{background:none;border:1px solid var(--edge);color:var(--muted);font-weight:600}
+  .wz-open.ghost:hover{border-color:var(--teal);color:var(--txt)}
+  .overlay{position:fixed;inset:0;background:rgba(4,8,11,.72);display:none;align-items:center;
+    justify-content:center;z-index:50;padding:20px}
+  .overlay.show{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--edge);border-radius:16px;width:100%;
+    max-width:600px;max-height:88vh;overflow:auto;padding:24px}
+  .modal h3{margin:0 0 4px;font-size:17px}
+  .modal .step-of{font-size:11px;color:var(--faint);font-family:var(--mono);letter-spacing:.5px}
+  .dots{display:flex;gap:6px;margin:14px 0 18px}
+  .dots i{width:22px;height:3px;border-radius:2px;background:var(--edge)}
+  .dots i.on{background:var(--teal)}
+  .q{font-size:15.5px;font-weight:600;margin:6px 0 16px}
+  .opts{display:flex;flex-direction:column;gap:10px}
+  .opt{text-align:left;background:var(--panel2);border:1px solid var(--edge);border-radius:11px;
+    padding:14px 16px;cursor:pointer;color:var(--txt)}
+  .opt:hover{border-color:var(--teal)}
+  .opt.sel{border-color:var(--teal);background:rgba(25,181,181,.08)}
+  .opt .ot{font-size:14px;font-weight:600}
+  .opt .od{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.35}
+  .wz-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
+  .wz-form label{font-size:11px;color:var(--muted)}
+  .wz-form input,.wz-form select{width:100%;margin-top:5px;background:var(--panel2);
+    border:1px solid var(--edge);color:var(--txt);border-radius:7px;padding:8px 10px;
+    font-size:13px;font-family:var(--mono)}
+  .wz-form .full{grid-column:1/3}
+  .reco{background:var(--panel2);border:1px solid var(--edge);border-radius:11px;padding:14px 16px;margin:8px 0 14px}
+  .reco .rl{font-size:11px;color:var(--teal);font-weight:700;letter-spacing:.5px}
+  .reco .rm{font-family:var(--mono);font-size:15px;font-weight:600;margin:4px 0 8px}
+  .reco ul{margin:0;padding-left:18px} .reco li{font-size:12px;color:var(--muted);line-height:1.5;margin:3px 0}
+  .wz-nav{display:flex;justify-content:space-between;margin-top:20px}
+  .wz-nav button{border-radius:8px;padding:9px 18px;cursor:pointer;font-size:13px;font-weight:600;font-family:var(--sans)}
+  .wz-back{background:none;border:1px solid var(--edge);color:var(--muted)}
+  .wz-next{background:var(--teal);border:none;color:#04201f}
+  .wz-next:disabled{opacity:.4;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -128,6 +168,7 @@
 
   <!-- ===== 오버뷰 ===== -->
   <section id="overview">
+    <div class="toolbar"><button class="wz-open" onclick="openWizard()">＋ 설비 설정 마법사</button></div>
     <div class="summary" id="summary"></div>
     <div id="groups"></div>
   </section>
@@ -139,6 +180,7 @@
       <h2 id="dname">—</h2><span class="devid" id="ddevid"></span>
       <span class="tag" id="dgrp"></span>
       <span id="dflags"></span>
+      <button class="wz-open ghost" style="margin-left:auto" onclick="openWizard(DEV)">⚙ 이 설비 설정 마법사</button>
     </div>
     <div class="banner" id="banner"></div>
 
@@ -185,6 +227,20 @@
       <button class="save" id="saveCfg">저장</button>
     </details>
   </section>
+
+  <!-- ===== 설정 마법사 모달 ===== -->
+  <div class="overlay" id="wzOverlay">
+    <div class="modal">
+      <div class="step-of" id="wzStepOf"></div>
+      <h3 id="wzTitle">설비 설정 마법사</h3>
+      <div class="dots" id="wzDots"></div>
+      <div id="wzBody"></div>
+      <div class="wz-nav">
+        <button class="wz-back" id="wzBack">← 이전</button>
+        <button class="wz-next" id="wzNext">다음 →</button>
+      </div>
+    </div>
+  </div>
 
   <div class="foot" id="foot">
     베이스라인 = 가동(running) 샘플 중앙값(드리프트 추적) · 소프트 = 조기경보선(하드 아래) ·
@@ -351,13 +407,15 @@ async function loadDetail(){
 async function loadConfigForm(){
   const cfg = await fetch(`/api/config?device=${encodeURIComponent(DEV)}`).then(r=>r.json());
   const f = [
-    ["label","이름","text"],["grp","그룹","select"],["unit","단위","text"],
+    ["label","이름","text"],["grp","그룹","grp"],["unit","단위","text"],
+    ["method","탐지 방식","method"],
     ["nominal","nominal","num"],["soft","soft","num"],["hard","hard","num"],
     ["idle_floor","idle_floor (정지판정)","num"],["baseline_n","baseline_n (창)","num"],
-    ["drift_pct","drift_pct (예:0.15)","num"],["dropout_enable","dropout(1/0)","num"],
+    ["drift_pct","drift_pct (예:0.15)","num"],["cusum_h","cusum_h","num"],["z_k","z_k","num"],
+    ["dropout_enable","dropout(1/0)","num"],["learn","자동학습(1/0)","num"],
   ];
   $("#cfgForm").innerHTML = f.map(([k,l,t])=>{
-    if(t==="select"){const opts=["도장","사출","유틸","기타"];
+    if(t==="grp"||t==="method"){const opts=t==="grp"?["도장","사출","유틸","기타"]:["absolute","drift","cusum","zscore"];
       return `<label>${l}<select data-k="${k}">${opts.map(o=>
         `<option ${cfg[k]===o?"selected":""}>${o}</option>`).join("")}</select></label>`;}
     return `<label>${l}<input data-k="${k}" type="${t==="num"?"number":"text"}" step="any"
@@ -389,6 +447,125 @@ document.querySelectorAll(".rng").forEach(b=>b.onclick=()=>{
 
 function tick(){ VIEW==="overview" ? loadOverview() : loadDetail(); }
 function schedule(){ clearInterval(timer); timer=setInterval(tick, POLL_MS); }
+
+// ================= 설정 마법사 =================
+const WQ = [
+  {id:"ident", q:"어떤 설비인가요?", form:true},
+  {id:"fail", q:"이 설비는 주로 어떻게 이상이 오나요?", opts:[
+    {k:"grad", t:"부하가 서서히 올라가다 문제", d:"마모·고착·열화 — 추세가 서서히 상승 (베어링·펌프·서보 대부분)"},
+    {k:"sudden", t:"갑자기 멈추거나 신호가 끊김", d:"단선·급정지 — 전조 없이 0으로 (히터밴드·릴레이형)"},
+    {k:"both", t:"둘 다 / 잘 모름", d:"점진 상승과 급락 모두 감시"}]},
+  {id:"pattern", q:"가동 패턴은 어떤가요?", opts:[
+    {k:"cont", t:"거의 계속 돌아감", d:"컴프레서·냉각수 펌프 등 상시 가동"},
+    {k:"stop", t:"자주 서고 켜짐", d:"라인 정지가 잦음 — 정지 전류를 베이스라인에서 제외해야"},
+    {k:"cycle", t:"짧은 사이클 반복", d:"사출 1샷 등 주기적 부하"}]},
+  {id:"noise", q:"측정값이 얼마나 출렁이나요?", opts:[
+    {k:"stable", t:"비교적 안정적", d:"값이 잔잔함"},
+    {k:"noisy", t:"출렁임이 큼", d:"서보·인버터 PWM 등 비정현파 — 노이즈 강건 방식 필요"}]},
+  {id:"known", q:"정상 상태의 기준 전류(값)를 아나요?", opts:[
+    {k:"yes", t:"명판/실측값이 있음", d:"다음 화면에서 정상치를 입력합니다"},
+    {k:"no", t:"모름 → 자동 학습", d:"며칠 정상 데이터로 nominal/soft/hard 를 자동 확정"}]},
+  {id:"review", q:"추천 설정 확인", review:true},
+];
+let wz = {step:0, dev:null, a:{}, cfg:{}};
+
+function recommend(a){
+  const noisy = a.noise==="noisy";
+  let method="drift", why=[];
+  if(a.fail==="sudden"){ method="absolute"; why.push("급사형 → 절대 임계 중심으로 감시"); }
+  else if(noisy){ method="cusum"; why.push("출렁이는 신호 → CUSUM(누적합)으로 노이즈 속 미세 상승을 조기 포착"); }
+  else { method="drift"; why.push("점진 열화 → 드리프트(정상 대비 상승률)로 추적"); }
+  let dropout = ((a.fail==="sudden"||a.fail==="both") && a.pattern==="cont") ? 1 : 0;
+  if(dropout) why.push("연속가동 + 급사 가능 → 드롭아웃(단선/급정지) 감지 ON");
+  else if(a.fail==="sudden"||a.fail==="both") why.push("※ 정지가 잦아 드롭아웃은 OFF (연속가동 설비에서만 오탐 없이 동작)");
+  if(a.pattern==="stop"||a.pattern==="cycle") why.push("정지/사이클형 → 베이스라인은 '가동 중' 샘플만으로 계산(정지 전류 제외)");
+  const baseline_n = noisy?300 : a.pattern==="cycle"?120:200;
+  if(noisy) why.push("노이즈 큼 → 베이스라인 창을 넓혀("+baseline_n+") 안정화");
+  const patch = {method, dropout_enable:dropout, baseline_n, z_k:noisy?4.0:3.5, cusum_k:0.5, cusum_h:noisy?6.0:5.0};
+  if(a.known==="no"){ patch.learn=1; why.push("정상치 모름 → 자동학습 ON: 정상 데이터가 충분히 쌓이면 임계를 자동 확정"); }
+  else { patch.learn=0; }
+  const methodKO={absolute:"절대 임계",drift:"드리프트(상대 상승률)",cusum:"CUSUM(누적합·조기감지)",zscore:"로버스트 z-score"};
+  return {patch, why, methodLabel:methodKO[method]};
+}
+
+function openWizard(dev){
+  wz = {step:0, dev:dev||null, a:{}, cfg:{}};
+  document.getElementById("wzOverlay").classList.add("show");
+  if(dev){
+    fetch(`/api/config?device=${encodeURIComponent(dev)}`).then(r=>r.json()).then(cfg=>{wz.cfg=cfg; renderWizard();});
+  } else renderWizard();
+}
+function closeWizard(){ document.getElementById("wzOverlay").classList.remove("show"); }
+
+function renderWizard(){
+  const s=WQ[wz.step];
+  document.getElementById("wzStepOf").textContent=`STEP ${wz.step+1} / ${WQ.length}`;
+  document.getElementById("wzDots").innerHTML=WQ.map((_,i)=>`<i class="${i<=wz.step?"on":""}"></i>`).join("");
+  const body=document.getElementById("wzBody");
+  const next=document.getElementById("wzNext");
+  document.getElementById("wzBack").style.visibility = wz.step===0 ? "hidden":"visible";
+
+  if(s.form){
+    const c=wz.cfg;
+    body.innerHTML=`<div class="q">${s.q}</div><div class="wz-form">
+      <label class="full">설비 ID (영문/숫자)<input id="w_dev" value="${wz.dev||c.device||""}" ${wz.dev?"disabled":""} placeholder="예: FGP-L2"></label>
+      <label class="full">이름<input id="w_label" value="${c.label||wz.dev||""}" placeholder="예: 경화제 FGP 서보"></label>
+      <label>그룹<select id="w_grp">${["도장","사출","유틸","기타"].map(o=>`<option ${c.grp===o?"selected":""}>${o}</option>`).join("")}</select></label>
+      <label>단위<input id="w_unit" value="${c.unit||"A"}" placeholder="A / % / bar"></label>
+    </div>`;
+    next.textContent="다음 →"; next.disabled=false;
+  } else if(s.review){
+    const r=recommend(wz.a); wz.reco=r;
+    const needVals = wz.a.known==="yes";
+    const c=wz.cfg;
+    body.innerHTML=`<div class="q">${s.q}</div>
+      <div class="reco"><div class="rl">추천 탐지 방식</div><div class="rm">${r.methodLabel}${r.patch.dropout_enable?" + 드롭아웃":""}${r.patch.learn?" + 자동학습":""}</div>
+        <ul>${r.why.map(w=>`<li>${w}</li>`).join("")}</ul></div>
+      ${needVals?`<div class="wz-form">
+        <label>정상치 nominal<input id="w_nominal" type="number" step="any" value="${c.nominal??""}" placeholder="명판/실측 A"></label>
+        <label>하드 트립 hard<input id="w_hard" type="number" step="any" value="${c.hard??""}" placeholder="모르면 비워두기"></label>
+        <div class="full" style="font-size:11px;color:var(--faint)">소프트 경고선은 nominal×1.2 로 자동 설정됩니다. hard 를 비우면 nominal×1.5(임시).</div>
+      </div>`:`<div style="font-size:12.5px;color:var(--muted);line-height:1.5">
+        자동학습 모드입니다. 지금은 임계를 비워두고, 정상 가동 데이터가 충분히 쌓이면 시스템이 nominal·soft·hard 를 자동으로 확정합니다.</div>`}`;
+    next.textContent="저장"; next.disabled=false;
+  } else {
+    body.innerHTML=`<div class="q">${s.q}</div><div class="opts">${s.opts.map(o=>
+      `<button class="opt ${wz.a[s.id]===o.k?"sel":""}" data-k="${o.k}"><div class="ot">${o.t}</div><div class="od">${o.d}</div></button>`).join("")}</div>`;
+    next.textContent="다음 →"; next.disabled=!wz.a[s.id];
+    body.querySelectorAll(".opt").forEach(el=>el.onclick=()=>{
+      wz.a[s.id]=el.dataset.k;
+      body.querySelectorAll(".opt").forEach(x=>x.classList.remove("sel")); el.classList.add("sel");
+      next.disabled=false;
+    });
+  }
+}
+
+document.getElementById("wzBack").onclick=()=>{ if(wz.step>0){wz.step--; renderWizard();} };
+document.getElementById("wzNext").onclick=async ()=>{
+  const s=WQ[wz.step];
+  if(s.form){
+    const dev=(document.getElementById("w_dev").value||"").trim();
+    if(!dev){ alert("설비 ID를 입력하세요"); return; }
+    wz.dev=dev;
+    wz.ident={device:dev, label:(document.getElementById("w_label").value||dev).trim(),
+      grp:document.getElementById("w_grp").value, unit:(document.getElementById("w_unit").value||"A").trim()};
+  }
+  if(s.review){
+    const body={device:wz.dev, ...wz.ident, ...wz.reco.patch};
+    if(wz.a.known==="yes"){
+      const nom=parseFloat(document.getElementById("w_nominal").value);
+      const hardIn=parseFloat(document.getElementById("w_hard").value);
+      if(!isNaN(nom)){ body.nominal=nom; body.soft=+(nom*1.2).toFixed(2); body.hard=!isNaN(hardIn)?hardIn:+(nom*1.5).toFixed(2); }
+    }
+    document.getElementById("wzNext").disabled=true;
+    await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    closeWizard();
+    wz.dev && VIEW==="detail" ? (DEV=wz.dev, loadDetail()) : (openDevice(wz.dev));
+    return;
+  }
+  wz.step++; renderWizard();
+};
+document.getElementById("wzOverlay").onclick=(e)=>{ if(e.target.id==="wzOverlay") closeWizard(); };
 
 goOverview();
 </script>

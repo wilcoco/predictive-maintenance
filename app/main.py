@@ -66,6 +66,7 @@ def _summarize(c, device, spark_n=40):
         "drift": drift, "drift_pct": round(ev["drift_ratio"] * 100, 1),
         "dropout": dropout,
         "nominal": cfg["nominal"], "soft": cfg["soft"], "hard": cfg["hard"],
+        "method": cfg["method"], "learn": cfg["learn"],
         "spark": [v for _, v in window[-spark_n:]] if spark_n else [],
     }
 
@@ -113,19 +114,9 @@ def read_config(device: str = "FGP-L2"):
 async def write_config(req: Request):
     b = await req.json()
     device = str(b.get("device", "FGP-L2"))
-    patch = {}
-    for k in ("label", "grp", "unit"):
-        if k in b:
-            patch[k] = str(b[k])
-    for k in ("nominal", "soft", "hard", "idle_floor", "drift_pct"):
-        if k in b and b[k] is not None:
-            patch[k] = float(b[k])
-    if "baseline_n" in b and b["baseline_n"] is not None:
-        patch["baseline_n"] = int(b["baseline_n"])
-    if "dropout_enable" in b and b["dropout_enable"] is not None:
-        patch["dropout_enable"] = 1 if b["dropout_enable"] else 0
+    patch = {k: b[k] for k in db.CFG_KEYS if k in b and b[k] is not None}
     with _write_lock, closing(db.db()) as c:
-        cur = db.set_config(c, device, patch)
+        cur = db.set_config(c, device, patch)  # 타입 캐스팅은 db.cast 가 처리
         c.commit()
     cur["device"] = device
     return {"ok": True, "config": cur}

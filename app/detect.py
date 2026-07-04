@@ -67,6 +67,62 @@ def drift_ratio(base, cfg):
     return base / nom - 1.0
 
 
+def robust_sigma(vals):
+    """MAD 기반 로버스트 표준편차 추정 (이상치·비정규에 강함)."""
+    if len(vals) < 4:
+        return 0.0
+    med = _median(vals)
+    mad = _median([abs(v - med) for v in vals])
+    return 1.4826 * mad
+
+
+def trend_state(cfg, base, run_vals, prev_warn, cusum_prev):
+    """선택된 방식으로 '추세 경고' 여부를 판정. 진입/이탈에 히스테리시스.
+
+    반환: (warn: bool, new_cusum: float, info: dict)
+    · absolute  베이스라인 ≥ soft            (단순·직관)
+    · drift     베이스라인 ≥ nominal×(1+p)   (상대 상승률)
+    · cusum     누적합 S > h·σ               (작지만 지속되는 상승을 조기 포착)
+    · zscore    로버스트 z(베이스라인) ≥ z_k (노이즈 큰 신호에 강건)
+    """
+    method = cfg.get("method", "absolute")
+    h = HYSTERESIS
+    new_cusum = cusum_prev
+    info = {}
+
+    # 워밍업: 베이스라인이 설 만큼 running 샘플이 모이기 전엔 판정 보류(초기 오탐 방지)
+    warmup = max(20, int(cfg["baseline_n"]) // 2)
+    if len(run_vals) < warmup:
+        return False, 0.0, {"warmup": True}
+
+    if method == "drift":
+        dr = drift_ratio(base, cfg)
+        on, off = dr >= cfg["drift_pct"], dr < cfg["drift_pct"] * (1 - h)
+    elif method == "zscore":
+        ref = run_vals[: max(4, len(run_vals) // 2)] if len(run_vals) >= 8 else run_vals
+        med = _median(ref) if ref else cfg["nominal"]
+        sig = robust_sigma(ref) or (cfg["nominal"] * 0.05) or 1.0
+        z = (base - med) / sig
+        info["z"] = round(z, 2)
+        on, off = z >= cfg["z_k"], z < cfg["z_k"] * 0.7
+    elif method == "cusum":
+        # 증분은 매끄러운 베이스라인에 적용(사인·노이즈 자기상관 오탐 방지),
+        # 임계 척도는 원시 σ 사용 → 보수적. 평탄 신호는 증분<0 이라 S=0 유지.
+        sig = robust_sigma(run_vals) or (cfg["nominal"] * 0.05) or 1.0
+        x = base
+        slack = cfg["cusum_k"] * sig
+        new_cusum = max(0.0, cusum_prev + (x - cfg["nominal"] - slack))
+        hh = cfg["cusum_h"] * sig
+        info["cusum"] = round(new_cusum, 3)
+        info["cusum_h"] = round(hh, 3)
+        on, off = new_cusum >= hh, new_cusum < hh * 0.5
+    else:  # absolute
+        on, off = base >= cfg["soft"], base < cfg["soft"] * (1 - h)
+
+    warn = True if on else (False if off else prev_warn)
+    return warn, new_cusum, info
+
+
 def is_dropout(window, cfg):
     """직전까지 가동(부하 있음) 중이었는데 마지막 값이 idle 이하로 급락."""
     if not cfg.get("dropout_enable"):
