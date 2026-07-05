@@ -63,18 +63,53 @@ def init():
             device TEXT NOT NULL, ts REAL NOT NULL,
             kind TEXT NOT NULL, level TEXT NOT NULL, irms REAL NOT NULL, note TEXT);
         CREATE INDEX IF NOT EXISTS ix_alerts ON alerts(device, ts);
-        CREATE TABLE IF NOT EXISTS state(
-            device TEXT PRIMARY KEY, level TEXT, drift INTEGER, dropout INTEGER,
-            cusum REAL DEFAULT 0, updated REAL);
+
+        -- ── 마스터 (MES/ERP 에서 sync 로 받기 전용 — 이 앱은 생성·관리하지 않음) ──
+        CREATE TABLE IF NOT EXISTS equipment(
+            id TEXT PRIMARY KEY, name TEXT, grp TEXT, meta TEXT, updated REAL);
+        CREATE TABLE IF NOT EXISTS molds(
+            id TEXT PRIMARY KEY, name TEXT, meta TEXT, updated REAL);
+        CREATE TABLE IF NOT EXISTS products(
+            id TEXT PRIMARY KEY, name TEXT, customer TEXT, meta TEXT, updated REAL);
+        CREATE TABLE IF NOT EXISTS bom(          -- 제품–금형–(호환)설비 관계
+            product_id TEXT NOT NULL, mold_id TEXT NOT NULL,
+            equipment_id TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(product_id, mold_id, equipment_id));
+
+        -- ── 가동 컨텍스트: "지금 설비 M 에 금형 K 로 제품 P" (이관=컨텍스트 변경) ──
+        CREATE TABLE IF NOT EXISTS run_context(
+            device TEXT PRIMARY KEY, mold_id TEXT DEFAULT '', product_id TEXT DEFAULT '',
+            since REAL);
+        CREATE TABLE IF NOT EXISTS run_sessions(   -- 장착 이력 = 금형 이동/이관 이력
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device TEXT NOT NULL, mold_id TEXT DEFAULT '', product_id TEXT DEFAULT '',
+            start_ts REAL, end_ts REAL);
+
+        -- ── 레짐: (설비×금형) 조합별 정상치 — 통합 판정의 핵심 ──
+        CREATE TABLE IF NOT EXISTS regimes(
+            device TEXT NOT NULL, mold_id TEXT NOT NULL DEFAULT '',
+            nominal REAL, soft REAL, learned INTEGER DEFAULT 0, n INTEGER DEFAULT 0,
+            created REAL, PRIMARY KEY(device, mold_id));
         """)
         # 스키마 진화 대응 — 없는 컬럼만 추가
         have = {r["name"] for r in c.execute("PRAGMA table_info(config)")}
         for k in CFG_KEYS:
             if k not in have:
                 c.execute(f"ALTER TABLE config ADD COLUMN {k} {_sqltype(k)}")
-        have_st = {r["name"] for r in c.execute("PRAGMA table_info(state)")}
-        if "cusum" not in have_st:
-            c.execute("ALTER TABLE state ADD COLUMN cusum REAL DEFAULT 0")
+        for tbl in ("readings", "alerts"):
+            cols = {r["name"] for r in c.execute(f"PRAGMA table_info({tbl})")}
+            for k in ("mold_id", "product_id"):
+                if k not in cols:
+                    c.execute(f"ALTER TABLE {tbl} ADD COLUMN {k} TEXT DEFAULT ''")
+        # state: (device×mold) 복합키로 재구성 — 레벨/CUSUM 은 레짐별 (일시 상태라 드롭 무해)
+        st_cols = {r["name"] for r in c.execute("PRAGMA table_info(state)")}
+        if st_cols and "mold_id" not in st_cols:
+            c.execute("DROP TABLE state")
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS state(
+            device TEXT NOT NULL, mold_id TEXT NOT NULL DEFAULT '',
+            level TEXT, drift INTEGER, dropout INTEGER,
+            cusum REAL DEFAULT 0, updated REAL, PRIMARY KEY(device, mold_id))""")
         c.commit()
 
 
@@ -111,33 +146,138 @@ def set_config(c, device, patch):
     return cur
 
 
-def get_state(c, device):
-    r = c.execute("SELECT level,drift,dropout,cusum FROM state WHERE device=?", (device,)).fetchone()
+def get_state(c, device, mold_id=""):
+    r = c.execute("SELECT level,drift,dropout,cusum FROM state WHERE device=? AND mold_id=?",
+                  (device, mold_id)).fetchone()
     if r:
         return {"level": r["level"] or "OK", "drift": bool(r["drift"]),
                 "dropout": bool(r["dropout"]), "cusum": r["cusum"] or 0.0}
     return {"level": "OK", "drift": False, "dropout": False, "cusum": 0.0}
 
 
-def set_state(c, device, level, drift, dropout, cusum=0.0):
+def set_state(c, device, level, drift, dropout, cusum=0.0, mold_id=""):
     c.execute(
-        "INSERT INTO state(device,level,drift,dropout,cusum,updated) VALUES(?,?,?,?,?,?) "
-        "ON CONFLICT(device) DO UPDATE SET level=?,drift=?,dropout=?,cusum=?,updated=?",
-        (device, level, int(drift), int(dropout), float(cusum), time.time(),
+        "INSERT INTO state(device,mold_id,level,drift,dropout,cusum,updated) VALUES(?,?,?,?,?,?,?) "
+        "ON CONFLICT(device,mold_id) DO UPDATE SET level=?,drift=?,dropout=?,cusum=?,updated=?",
+        (device, mold_id, level, int(drift), int(dropout), float(cusum), time.time(),
          level, int(drift), int(dropout), float(cusum), time.time()))
 
 
-def recent_window(c, device, n=600):
-    rows = c.execute(
-        "SELECT ts,irms FROM readings WHERE device=? ORDER BY ts DESC LIMIT ?",
-        (device, n)).fetchall()
+def recent_window(c, device, n=600, mold_id=None):
+    """mold_id=None → 전체(레짐 무관), 문자열('' 포함) → 그 레짐의 데이터만."""
+    if mold_id is None:
+        rows = c.execute(
+            "SELECT ts,irms FROM readings WHERE device=? ORDER BY ts DESC LIMIT ?",
+            (device, n)).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT ts,irms FROM readings WHERE device=? AND mold_id=? ORDER BY ts DESC LIMIT ?",
+            (device, mold_id, n)).fetchall()
     return [(r["ts"], r["irms"]) for r in reversed(rows)]
 
 
-def running_count(c, device, idle_floor):
-    r = c.execute("SELECT COUNT(*) n FROM readings WHERE device=? AND irms>?",
-                  (device, idle_floor)).fetchone()
-    return r["n"]
+# ----------------------------------------------------------------------
+# 마스터 (MES/ERP sync 수신 전용)
+# ----------------------------------------------------------------------
+import json as _json
+
+def upsert_masters(c, payload):
+    """{"equipment":[...], "molds":[...], "products":[...], "bom":[...]} 일괄 upsert."""
+    now = time.time()
+    counts = {}
+    for row in payload.get("equipment", []):
+        meta = _json.dumps({k: v for k, v in row.items() if k not in ("id", "name", "grp")},
+                           ensure_ascii=False)
+        c.execute("INSERT INTO equipment(id,name,grp,meta,updated) VALUES(?,?,?,?,?) "
+                  "ON CONFLICT(id) DO UPDATE SET name=?,grp=?,meta=?,updated=?",
+                  (row["id"], row.get("name"), row.get("grp"), meta, now,
+                   row.get("name"), row.get("grp"), meta, now))
+        # 모니터링 중인 설비면 라벨·그룹을 마스터 기준으로 동기화
+        if c.execute("SELECT 1 FROM config WHERE device=?", (row["id"],)).fetchone():
+            if row.get("name"):
+                c.execute("UPDATE config SET label=? WHERE device=?", (row["name"], row["id"]))
+            if row.get("grp"):
+                c.execute("UPDATE config SET grp=? WHERE device=?", (row["grp"], row["id"]))
+    counts["equipment"] = len(payload.get("equipment", []))
+    for row in payload.get("molds", []):
+        meta = _json.dumps({k: v for k, v in row.items() if k not in ("id", "name")},
+                           ensure_ascii=False)
+        c.execute("INSERT INTO molds(id,name,meta,updated) VALUES(?,?,?,?) "
+                  "ON CONFLICT(id) DO UPDATE SET name=?,meta=?,updated=?",
+                  (row["id"], row.get("name"), meta, now, row.get("name"), meta, now))
+    counts["molds"] = len(payload.get("molds", []))
+    for row in payload.get("products", []):
+        meta = _json.dumps({k: v for k, v in row.items() if k not in ("id", "name", "customer")},
+                           ensure_ascii=False)
+        c.execute("INSERT INTO products(id,name,customer,meta,updated) VALUES(?,?,?,?,?) "
+                  "ON CONFLICT(id) DO UPDATE SET name=?,customer=?,meta=?,updated=?",
+                  (row["id"], row.get("name"), row.get("customer"), meta, now,
+                   row.get("name"), row.get("customer"), meta, now))
+    counts["products"] = len(payload.get("products", []))
+    for row in payload.get("bom", []):
+        c.execute("INSERT OR IGNORE INTO bom(product_id,mold_id,equipment_id) VALUES(?,?,?)",
+                  (row["product_id"], row["mold_id"], row.get("equipment_id", "")))
+    counts["bom"] = len(payload.get("bom", []))
+    return counts
+
+
+def master_name(c, table, _id):
+    if not _id:
+        return None
+    r = c.execute(f"SELECT name FROM {table} WHERE id=?", (_id,)).fetchone()
+    return r["name"] if r else None
+
+
+# ----------------------------------------------------------------------
+# 가동 컨텍스트 (장착/이관)
+# ----------------------------------------------------------------------
+def get_context(c, device):
+    r = c.execute("SELECT mold_id,product_id,since FROM run_context WHERE device=?",
+                  (device,)).fetchone()
+    if r:
+        return {"mold_id": r["mold_id"] or "", "product_id": r["product_id"] or "",
+                "since": r["since"]}
+    return {"mold_id": "", "product_id": "", "since": None}
+
+
+def set_context(c, device, mold_id, product_id, ts=None):
+    """컨텍스트 변경 = 이전 세션 종료 + 새 세션 시작. 금형 이동/이관의 기록 단위."""
+    ts = ts or time.time()
+    cur = get_context(c, device)
+    if cur["mold_id"] == (mold_id or "") and cur["product_id"] == (product_id or ""):
+        return cur  # 변화 없음
+    c.execute("UPDATE run_sessions SET end_ts=? WHERE device=? AND end_ts IS NULL",
+              (ts, device))
+    c.execute("INSERT INTO run_sessions(device,mold_id,product_id,start_ts) VALUES(?,?,?,?)",
+              (device, mold_id or "", product_id or "", ts))
+    c.execute("INSERT INTO run_context(device,mold_id,product_id,since) VALUES(?,?,?,?) "
+              "ON CONFLICT(device) DO UPDATE SET mold_id=?,product_id=?,since=?",
+              (device, mold_id or "", product_id or "", ts,
+               mold_id or "", product_id or "", ts))
+    return {"mold_id": mold_id or "", "product_id": product_id or "", "since": ts}
+
+
+# ----------------------------------------------------------------------
+# 레짐: (설비×금형) 조합별 정상치
+# ----------------------------------------------------------------------
+def get_regime(c, device, mold_id):
+    r = c.execute("SELECT nominal,soft,learned,n FROM regimes WHERE device=? AND mold_id=?",
+                  (device, mold_id)).fetchone()
+    return dict(r) if r else None
+
+
+def ensure_regime(c, device, mold_id, cfg):
+    """새 (설비×금형) 조합 등장 시 레짐 행 생성 — 임계는 학습 전(미확정) 상태."""
+    if get_regime(c, device, mold_id) is None:
+        c.execute("INSERT INTO regimes(device,mold_id,nominal,soft,learned,n,created) "
+                  "VALUES(?,?,?,?,0,0,?)",
+                  (device, mold_id, cfg["nominal"], cfg["soft"], time.time()))
+    return get_regime(c, device, mold_id)
+
+
+def learn_regime(c, device, mold_id, nominal, soft, n):
+    c.execute("UPDATE regimes SET nominal=?,soft=?,learned=1,n=? WHERE device=? AND mold_id=?",
+              (nominal, soft, n, device, mold_id))
 
 
 def list_devices(c):

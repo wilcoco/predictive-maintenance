@@ -171,6 +171,11 @@
     <div class="toolbar"><button class="wz-open" onclick="openWizard()">＋ 설비 설정 마법사</button></div>
     <div class="summary" id="summary"></div>
     <div id="groups"></div>
+    <div class="card-panel" id="moldPanel" style="display:none">
+      <h3 style="font-size:13px;color:var(--muted);margin:0 0 10px">금형 현황 <span style="color:var(--faint);font-weight:400">· 마스터는 MES/ERP 에서 sync</span></h3>
+      <table><thead><tr><th>금형</th><th>현재 장착</th><th>거쳐간 설비</th><th>경고</th><th>귀속 힌트</th></tr></thead>
+        <tbody id="moldRows"></tbody></table>
+    </div>
   </section>
 
   <!-- ===== 설비 상세 ===== -->
@@ -217,8 +222,8 @@
 
     <div class="card-panel">
       <h3 style="font-size:13px;color:var(--muted);margin:0 0 10px">경고 이력</h3>
-      <table><thead><tr><th>시각</th><th>유형</th><th>레벨</th><th>값</th><th>비고</th></tr></thead>
-        <tbody id="alertRows"><tr><td class="empty" colspan="5">경고 이력 없음</td></tr></tbody></table>
+      <table><thead><tr><th>시각</th><th>유형</th><th>레벨</th><th>값</th><th>금형</th><th>비고</th></tr></thead>
+        <tbody id="alertRows"><tr><td class="empty" colspan="6">경고 이력 없음</td></tr></tbody></table>
     </div>
 
     <details class="cfg">
@@ -310,11 +315,37 @@ async function loadOverview(){
         <div class="sub">기준 ${num(d.baseline)} · soft ${num(d.soft,1)} · hard ${num(d.hard,1)}
           ${d.drift?`<span class="flag drift">드리프트 +${d.drift_pct}%</span>`:""}
           ${d.dropout?`<span class="flag dropout">드롭아웃</span>`:""}</div>
+        ${d.mold?`<div class="sub" style="margin-top:5px">⚒ ${d.mold_name||d.mold} · ${d.product_name||d.product||"—"}
+          ${d.regime_learned===false?`<span class="flag drift">레짐 학습중</span>`:""}</div>`:""}
         ${sparkSVG(d.spark, color(d.level))}
       </div>`).join("")}</div>`).join("");
+  loadMolds();
 
   document.querySelectorAll(".card").forEach(el=>
     el.onclick=()=>openDevice(decodeURIComponent(el.dataset.dev)));
+}
+
+async function loadMolds(){
+  let m;
+  try{ m = await fetch("/api/master?kind=molds").then(r=>r.json()); }catch(e){ return; }
+  const molds = m.molds||[];
+  const panel = document.getElementById("moldPanel");
+  if(!molds.length){ panel.style.display="none"; return; }
+  panel.style.display="block";
+  const rows = await Promise.all(molds.map(async md=>{
+    let hint = "";
+    if(md.alerts>0){
+      try{ hint = (await fetch(`/api/entity?type=mold&id=${encodeURIComponent(md.id)}`)
+        .then(r=>r.json())).hint || ""; }catch(e){}
+    }
+    return `<tr><td style="color:var(--txt)">${md.name||md.id}<br>
+        <span style="color:var(--faint);font-size:10.5px">${md.id}</span></td>
+      <td>${md.current_device||"—"}</td>
+      <td>${(md.devices_ran||[]).join(", ")||"—"}</td>
+      <td class="lv ${md.alerts>0?"WARNING":""}">${md.alerts}</td>
+      <td style="font-family:var(--sans);font-size:11.5px;line-height:1.4">${hint||"—"}</td></tr>`;
+  }));
+  document.getElementById("moldRows").innerHTML = rows.join("");
 }
 
 // ---------------- 상세 ----------------
@@ -371,6 +402,8 @@ async function loadDetail(){
   $("#ddevid").textContent = DEV;
   $("#dgrp").textContent = st.grp||"";
   $("#dflags").innerHTML =
+    (st.mold?`<span class="tag" style="color:var(--teal);border-color:rgba(25,181,181,.4)">⚒ ${st.mold_name||st.mold} · ${st.product_name||st.product||"—"}</span>`:"")+
+    (st.regime_learned===false?`<span class="flag drift">레짐 학습중 — 임계 확정 전</span>`:"")+
     (st.drift?`<span class="flag drift">드리프트 +${st.drift_pct}%</span>`:"")+
     (st.dropout?`<span class="flag dropout">드롭아웃</span>`:"");
   $("#cur").innerHTML = num(st.irms)+`<span class="unit"> ${st.unit||""}</span>`;
@@ -400,8 +433,9 @@ async function loadDetail(){
   const tb=$("#alertRows");
   tb.innerHTML = al.length ? al.map(a=>`<tr>
     <td>${fmtFull(a.ts)}</td><td><span class="kind">${a.kind}</span></td>
-    <td class="lv ${a.level}">${a.level}</td><td>${num(a.irms)}</td><td>${a.note||""}</td></tr>`).join("")
-    : `<tr><td class="empty" colspan="5">경고 이력 없음</td></tr>`;
+    <td class="lv ${a.level}">${a.level}</td><td>${num(a.irms)}</td>
+    <td>${a.mold_id||"—"}</td><td>${a.note||""}</td></tr>`).join("")
+    : `<tr><td class="empty" colspan="6">경고 이력 없음</td></tr>`;
 }
 
 async function loadConfigForm(){

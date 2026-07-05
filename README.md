@@ -102,6 +102,31 @@ curl -X POST http://localhost:8000/ingest \
 설정 항목 전체: `label, grp, unit, nominal, soft, hard, idle_floor, baseline_n, drift_pct,
 dropout_enable, method, cusum_k, cusum_h, z_k, learn`.
 
+## 설비 × 금형 × 제품 — 분기와 통합
+
+측정 신호는 한 엔티티가 아니라 **(설비 × 금형 × 제품) 합동 관측**이다. 그래서:
+
+- **마스터 테이블**(equipment/molds/products/bom)은 **회사 MES/ERP 에서 받기 전용** —
+  이 앱은 마스터를 생성·관리하지 않는다. `POST /api/master/sync` 로 밀어넣으면 upsert.
+  ```bash
+  curl -X POST .../api/master/sync -H "Content-Type: application/json" -d '{
+    "equipment":[{"id":"INJ-1","name":"1호기 사출기","grp":"사출"}],
+    "molds":[{"id":"MOLD-A","name":"범퍼 금형 A"}],
+    "products":[{"id":"PROD-100","name":"범퍼 RG3","customer":"현대"}],
+    "bom":[{"product_id":"PROD-100","mold_id":"MOLD-A","equipment_id":"INJ-1"}]}'
+  ```
+- **가동 컨텍스트**: `POST /api/context {"device","mold","product"}` = "지금 설비 M에 금형 K로 제품 P".
+  측정값에 인라인 태그(`/ingest` 에 `mold`,`product`)를 실어도 된다. BOM에 없는 조합은 경고(차단은 안 함).
+- **통합 — 레짐 베이스라인**: `nominal/soft` 는 **(설비×금형) 레짐별** (금형 바뀌면 정상 부하가 다르므로),
+  `hard` 는 설비 레벨 유지(트립은 모터 물성). 새 레짐은 **자동 학습**되고, 학습이 끝날 때까지
+  추세 경고를 보류 → **금형 교체/이관 직후 오탐 0**. 하드 ALARM 은 항상 활성.
+- **이관** = 컨텍스트 변경 이벤트. 금형이 다른 설비/현장으로 가면 새 device 로 `/api/context` 호출 —
+  장착 이력은 `run_sessions` 로 남고(금형 이력 유지), 새 조합은 재학습.
+- **분기 — 엔티티 뷰**: `GET /api/entity?type=mold|equipment|product&id=` — 금형이 거쳐간 설비·레짐·경고,
+  설비가 돌린 금형들, 제품의 BOM·현재 생산처.
+- **귀속(원인 분리)**: 경고가 **금형을 따라가면**(서로 다른 설비 ≥2대에서 같은 금형에 경고) → 금형 원인 힌트.
+  **설비를 따라가면**(같은 설비에서 서로 다른 금형 ≥2종 경고) → 설비 원인 힌트. 대시보드 금형 현황에 표시.
+
 ## 구조
 
 ```

@@ -47,6 +47,23 @@ def _value(dev, prog, i, rnd, nominal, soft):
     return round(max(0.0, v), 3)
 
 
+# 데모 마스터 (실운영에선 MES/ERP 가 /api/master/sync 로 밀어넣음)
+MASTERS = {
+    "equipment": [
+        {"id": d[0], "name": d[1], "grp": d[2]} for d in [
+            ("FGP-L2","경화제 FGP 서보","도장"),("CONV-L2","L2 컨베어 구동","도장"),
+            ("COMP-01","컴프레서 #1","유틸"),("CWP-01","냉각수 펌프","유틸"),
+            ("INJ-HYD-1","1호기 유압펌프","사출"),("INJ-SV-1","1호기 사출서보","사출"),
+            ("HEATER-3","3호기 노즐히터","사출")]],
+    "molds": [{"id":"MOLD-BP1","name":"범퍼 금형 #1"},{"id":"MOLD-GR2","name":"그릴 금형 #2"}],
+    "products": [{"id":"PROD-BP","name":"범퍼 RG3","customer":"현대"},
+                 {"id":"PROD-GR","name":"그릴 GN7","customer":"기아"}],
+    "bom": [{"product_id":"PROD-BP","mold_id":"MOLD-BP1","equipment_id":"INJ-HYD-1"},
+            {"product_id":"PROD-GR","mold_id":"MOLD-GR2","equipment_id":"INJ-SV-1"}],
+}
+CONTEXTS = [("INJ-HYD-1","MOLD-BP1","PROD-BP"), ("INJ-SV-1","MOLD-GR2","PROD-GR")]
+
+
 def generate(start_ts=None):
     if start_ts is None:
         start_ts = time.time() - N * STEP   # 데이터가 '지금'에서 끝나도록
@@ -55,6 +72,9 @@ def generate(start_ts=None):
             db.set_config(c, dev, dict(label=label, grp=grp, unit=unit,
                                        nominal=nominal, soft=soft, hard=hard,
                                        dropout_enable=dropout))
+        db.upsert_masters(c, MASTERS)
+        for dev, mold, prod in CONTEXTS:
+            db.set_context(c, dev, mold, prod, start_ts)
         c.commit()
         for idx, (dev, label, grp, unit, nominal, soft, hard, dropout) in enumerate(DEVICES):
             rnd = random.Random(1000 + idx)
