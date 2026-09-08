@@ -110,6 +110,10 @@ def init():
             device TEXT NOT NULL, mold_id TEXT NOT NULL DEFAULT '',
             level TEXT, drift INTEGER, dropout INTEGER,
             cusum REAL DEFAULT 0, updated REAL, PRIMARY KEY(device, mold_id))""")
+        # det: 멀티 탐지기 스냅샷(JSON) — 각 탐지기 발동상태·지표. 히스테리시스 prev + 화면 표시.
+        st_cols2 = {r["name"] for r in c.execute("PRAGMA table_info(state)")}
+        if "det" not in st_cols2:
+            c.execute("ALTER TABLE state ADD COLUMN det TEXT")
         c.commit()
 
 
@@ -147,20 +151,28 @@ def set_config(c, device, patch):
 
 
 def get_state(c, device, mold_id=""):
-    r = c.execute("SELECT level,drift,dropout,cusum FROM state WHERE device=? AND mold_id=?",
+    r = c.execute("SELECT level,drift,dropout,cusum,det FROM state WHERE device=? AND mold_id=?",
                   (device, mold_id)).fetchone()
     if r:
+        det = {}
+        if r["det"]:
+            try:
+                det = _json.loads(r["det"])
+            except Exception:
+                det = {}
         return {"level": r["level"] or "OK", "drift": bool(r["drift"]),
-                "dropout": bool(r["dropout"]), "cusum": r["cusum"] or 0.0}
-    return {"level": "OK", "drift": False, "dropout": False, "cusum": 0.0}
+                "dropout": bool(r["dropout"]), "cusum": r["cusum"] or 0.0, "det": det}
+    return {"level": "OK", "drift": False, "dropout": False, "cusum": 0.0, "det": {}}
 
 
-def set_state(c, device, level, drift, dropout, cusum=0.0, mold_id=""):
+def set_state(c, device, level, drift, dropout, cusum=0.0, mold_id="", det=None):
+    det_json = _json.dumps(det, ensure_ascii=False) if det is not None else None
     c.execute(
-        "INSERT INTO state(device,mold_id,level,drift,dropout,cusum,updated) VALUES(?,?,?,?,?,?,?) "
-        "ON CONFLICT(device,mold_id) DO UPDATE SET level=?,drift=?,dropout=?,cusum=?,updated=?",
-        (device, mold_id, level, int(drift), int(dropout), float(cusum), time.time(),
-         level, int(drift), int(dropout), float(cusum), time.time()))
+        "INSERT INTO state(device,mold_id,level,drift,dropout,cusum,det,updated) "
+        "VALUES(?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(device,mold_id) DO UPDATE SET level=?,drift=?,dropout=?,cusum=?,det=?,updated=?",
+        (device, mold_id, level, int(drift), int(dropout), float(cusum), det_json, time.time(),
+         level, int(drift), int(dropout), float(cusum), det_json, time.time()))
 
 
 def recent_window(c, device, n=600, mold_id=None):

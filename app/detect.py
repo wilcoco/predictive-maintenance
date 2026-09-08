@@ -76,49 +76,88 @@ def robust_sigma(vals):
     return 1.4826 * mad
 
 
-def trend_state(cfg, base, run_vals, prev_warn, cusum_prev):
-    """선택된 방식으로 '추세 경고' 여부를 판정. 진입/이탈에 히스테리시스.
+METHODS = ("absolute", "drift", "cusum", "zscore")
+METHOD_LABEL = {"absolute": "절대", "drift": "드리프트", "cusum": "CUSUM", "zscore": "z-score"}
 
-    반환: (warn: bool, new_cusum: float, info: dict)
+
+def _method_signal(method, cfg, base, run_vals, cusum_prev):
+    """한 탐지기의 원시 판정. 반환: (on, off, info, new_cusum).
+
+    on/off 는 히스테리시스용 진입·이탈 임계 통과 여부. info 는 화면 표시용
+    (metric=현재 지표, thr=임계). cusum 만 상태(new_cusum)를 갱신한다.
     · absolute  베이스라인 ≥ soft            (단순·직관)
     · drift     베이스라인 ≥ nominal×(1+p)   (상대 상승률)
     · cusum     누적합 S > h·σ               (작지만 지속되는 상승을 조기 포착)
     · zscore    로버스트 z(베이스라인) ≥ z_k (노이즈 큰 신호에 강건)
     """
-    method = cfg.get("method", "absolute")
     h = HYSTERESIS
     new_cusum = cusum_prev
+    b = base if base is not None else cfg["nominal"]
     info = {}
 
-    # 워밍업: 베이스라인이 설 만큼 running 샘플이 모이기 전엔 판정 보류(초기 오탐 방지)
-    warmup = max(20, int(cfg["baseline_n"]) // 2)
-    if len(run_vals) < warmup:
-        return False, 0.0, {"warmup": True}
-
     if method == "drift":
-        dr = drift_ratio(base, cfg)
+        dr = drift_ratio(b, cfg)
+        info["metric"], info["thr"] = f"{dr * 100:+.0f}%", f"+{cfg['drift_pct'] * 100:.0f}%"
         on, off = dr >= cfg["drift_pct"], dr < cfg["drift_pct"] * (1 - h)
     elif method == "zscore":
         ref = run_vals[: max(4, len(run_vals) // 2)] if len(run_vals) >= 8 else run_vals
         med = _median(ref) if ref else cfg["nominal"]
         sig = robust_sigma(ref) or (cfg["nominal"] * 0.05) or 1.0
-        z = (base - med) / sig
-        info["z"] = round(z, 2)
+        z = (b - med) / sig
+        info["z"], info["metric"], info["thr"] = round(z, 2), f"z={z:.1f}", f"{cfg['z_k']:g}"
         on, off = z >= cfg["z_k"], z < cfg["z_k"] * 0.7
     elif method == "cusum":
         # 증분은 매끄러운 베이스라인에 적용(사인·노이즈 자기상관 오탐 방지),
         # 임계 척도는 원시 σ 사용 → 보수적. 평탄 신호는 증분<0 이라 S=0 유지.
         sig = robust_sigma(run_vals) or (cfg["nominal"] * 0.05) or 1.0
-        x = base
         slack = cfg["cusum_k"] * sig
-        new_cusum = max(0.0, cusum_prev + (x - cfg["nominal"] - slack))
+        new_cusum = max(0.0, cusum_prev + (b - cfg["nominal"] - slack))
         hh = cfg["cusum_h"] * sig
-        info["cusum"] = round(new_cusum, 3)
-        info["cusum_h"] = round(hh, 3)
+        info["cusum"], info["cusum_h"] = round(new_cusum, 3), round(hh, 3)
+        info["metric"], info["thr"] = f"{new_cusum:.2f}", f"{hh:.2f}"
         on, off = new_cusum >= hh, new_cusum < hh * 0.5
     else:  # absolute
-        on, off = base >= cfg["soft"], base < cfg["soft"] * (1 - h)
+        info["metric"], info["thr"] = f"{b:.1f}", f"{cfg['soft']:g}"
+        on, off = b >= cfg["soft"], b < cfg["soft"] * (1 - h)
 
+    return on, off, info, new_cusum
+
+
+def all_trends(cfg, base, run_vals, prev_warns, cusum_prev):
+    """4개 탐지기를 한 신호에 동시에 돌린다 (앙상블).
+
+    반환: (results, new_cusum)
+      results = {method: {"warn":bool, "label":str, "metric":str, "thr":str, ...}}
+    각 탐지기는 자기 이전 발동상태(prev_warns[method])로 히스테리시스를 건다.
+    공식 경고 발동(OR)·표시는 호출자가 results 로 결정한다.
+    워밍업(샘플 부족) 중에는 전부 보류.
+    """
+    warmup = max(20, int(cfg["baseline_n"]) // 2)
+    prev_warns = prev_warns or {}
+    if len(run_vals) < warmup:
+        return ({m: {"warn": False, "warmup": True, "label": METHOD_LABEL[m],
+                     "metric": "-", "thr": "-"} for m in METHODS}, cusum_prev)
+    results, new_cusum = {}, cusum_prev
+    for m in METHODS:
+        on, off, info, nc = _method_signal(m, cfg, base, run_vals, cusum_prev)
+        if m == "cusum":
+            new_cusum = nc
+        prev = bool(prev_warns.get(m, False))
+        warn = True if on else (False if off else prev)
+        results[m] = {"warn": warn, "label": METHOD_LABEL[m], **info}
+    return results, new_cusum
+
+
+def trend_state(cfg, base, run_vals, prev_warn, cusum_prev):
+    """단일 선택 방식(cfg['method'])의 추세 판정 — 하위호환 유지.
+
+    반환: (warn: bool, new_cusum: float, info: dict)
+    """
+    warmup = max(20, int(cfg["baseline_n"]) // 2)
+    if len(run_vals) < warmup:
+        return False, 0.0, {"warmup": True}
+    method = cfg.get("method", "absolute")
+    on, off, info, new_cusum = _method_signal(method, cfg, base, run_vals, cusum_prev)
     warn = True if on else (False if off else prev_warn)
     return warn, new_cusum, info
 

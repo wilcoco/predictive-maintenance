@@ -213,11 +213,21 @@ def _summarize(c, device, spark_n=40):
     eff = dict(cfg); eff["nominal"], eff["soft"] = eff_nominal, eff_soft
     window = db.recent_window(c, device, n=max(600, int(cfg["baseline_n"]) + 50),
                               mold_id=mold_id)
+    detectors = []
     if window:
         ev = detect.evaluate(window, eff)
         st = db.get_state(c, device, mold_id)
         # 대시보드 레벨/플래그는 디바운스된 상태값과 일치시킨다 (경고 이력과 동일 기준)
         level, drift, dropout = st["level"], st["drift"], st["dropout"]
+        # 멀티 탐지기 스코어보드 — 4개 탐지기 상태를 고정 순서로 (화면 표시용)
+        det = st.get("det") or {}
+        for m in detect.METHODS:
+            r = det.get(m)
+            if r:
+                detectors.append({"method": m, "label": r.get("label", m),
+                                  "warn": bool(r.get("warn")), "metric": r.get("metric", "-"),
+                                  "thr": r.get("thr", "-"),
+                                  "warmup": bool(r.get("warmup"))})
     else:
         ev = {"irms": None, "level": "NODATA", "baseline": None, "drift_ratio": 0.0}
         level, drift, dropout = "NODATA", False, False
@@ -233,6 +243,7 @@ def _summarize(c, device, spark_n=40):
         "mold_name": db.master_name(c, "molds", mold_id),
         "product_name": db.master_name(c, "products", ctx["product_id"]),
         "regime_learned": bool(regime and regime["learned"]) if mold_id else None,
+        "detectors": detectors,
         "spark": [v for _, v in window[-spark_n:]] if spark_n else [],
     }
 

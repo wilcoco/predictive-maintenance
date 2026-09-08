@@ -85,6 +85,7 @@ def process_reading(c, device, ts, irms, mold=None, product=None, notify=True):
     run_vals = detect.running_values(window, cfg["idle_floor"])
     level_state, drift_state, dropout_state, cusum_state = \
         st["level"], st["drift"], st["dropout"], st["cusum"]
+    det = st.get("det") or {}  # 탐지기 스냅샷 — 가동 중엔 갱신, 정지 중엔 직전값 보존
 
     if running:
         # 2) 학습: 레짐 미학습 상태에서 running 샘플이 충분하면 정상치 확정.
@@ -96,16 +97,19 @@ def process_reading(c, device, ts, irms, mold=None, product=None, notify=True):
             regime = db.get_regime(c, device, mold_id)
             eff["nominal"], eff["soft"] = regime["nominal"], regime["soft"]
 
-        # 3) 추세 경고 — 단, 레짐이 학습 전이면 보류 (임계가 미확정이므로)
+        # 3) 추세 경고 — 4개 탐지기를 동시에 돌린다(앙상블). 단, 레짐 학습 전이면 보류.
+        #    공식 WARNING = OR(어느 하나라도 발동) → 조기감지 우선. 발동한 탐지기는 노트·화면에 남김.
         trend_armed = regime["learned"] or (not mold_id and not cfg.get("learn"))
         if trend_armed:
-            prev_warn = st["level"] in ("WARNING", "ALARM")
-            warn, cusum_state, info = detect.trend_state(
-                eff, ev["baseline"], run_vals, prev_warn, st["cusum"])
+            prev_warns = st.get("det") or {}
+            det, cusum_state = detect.all_trends(
+                eff, ev["baseline"], run_vals, prev_warns, st["cusum"])
+            fired = [m for m, r in det.items() if r.get("warn")]
+            warn = bool(fired)
         else:
-            warn, cusum_state, info = False, 0.0, {"learning": True}
+            det, warn, fired, cusum_state = {"_learning": True}, False, [], 0.0
 
-        # 4) 레벨: ALARM=순간 피크(설비 하드, 안전), WARNING=추세 경고
+        # 4) 레벨: ALARM=순간 피크(설비 하드, 안전), WARNING=추세 경고(OR)
         if irms >= cfg["hard"] or (st["level"] == "ALARM" and irms >= cfg["hard"] * (1 - detect.HYSTERESIS)):
             new_level = "ALARM"
         elif warn:
@@ -115,7 +119,7 @@ def process_reading(c, device, ts, irms, mold=None, product=None, notify=True):
 
         # 5) 악화 전이에만 기록
         if detect.LEVEL_RANK.get(new_level, 0) > detect.LEVEL_RANK.get(st["level"], 0):
-            note = _reason(eff, ev, info)
+            note = _reason(eff, ev, det, fired)
             if new_level == "ALARM":
                 w = c.execute(
                     "SELECT ts FROM alerts WHERE device=? AND level='WARNING' AND ts<=? "
@@ -138,18 +142,22 @@ def process_reading(c, device, ts, irms, mold=None, product=None, notify=True):
             level_state = "ALARM"
 
     db.set_state(c, device, level_state, drift_state, dropout_state, cusum_state,
-                 mold_id=mold_id)
+                 mold_id=mold_id, det=det)
     ev["mold_id"], ev["product_id"] = mold_id, product_id
     ev["regime_learned"] = bool(regime and regime["learned"])
     return ev
 
 
-def _reason(cfg, ev, info):
-    m = cfg.get("method", "absolute")
-    if m == "cusum":
-        return f"CUSUM {info.get('cusum')} > {info.get('cusum_h')} — 지속 상승 추세 (베이스라인 {ev['baseline']})"
-    if m == "zscore":
-        return f"로버스트 z={info.get('z')} ≥ {cfg['z_k']} — 정상분포 이탈 (베이스라인 {ev['baseline']})"
-    if m == "drift":
-        return f"베이스라인 {ev['baseline']} — nominal 대비 +{ev['drift_ratio']*100:.0f}% (임계 {cfg['drift_pct']*100:.0f}%)"
-    return f"베이스라인 {ev['baseline']} ≥ soft {cfg['soft']}"
+def _reason(cfg, ev, det, fired):
+    """발동한 탐지기들을 근거로 경고 사유 문자열 구성 (앙상블 OR).
+
+    det: {method: {"label","metric","thr",...}}, fired: 발동한 method 목록.
+    """
+    if not fired:  # ALARM(하드 트립) 등 추세 외 사유
+        return f"순간값 {ev['irms']} ≥ hard {cfg['hard']} (베이스라인 {ev['baseline']})"
+    parts = []
+    for m in fired:
+        r = det.get(m, {})
+        parts.append(f"{r.get('label', m)} {r.get('metric', '')} (임계 {r.get('thr', '')})".strip())
+    head = f"탐지기 {len(fired)}/{len(detect.METHODS)} 발동"
+    return f"{head}: " + " · ".join(parts) + f" (베이스라인 {ev['baseline']})"

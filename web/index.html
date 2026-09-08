@@ -87,6 +87,19 @@
   .meta b{display:block;font-family:var(--mono);font-size:17px;color:var(--txt);font-weight:600;margin-top:3px}
   .meta .vbase b{color:var(--teal)} .meta .vsoft b{color:var(--warn)} .meta .vhard b{color:var(--alarm)}
 
+  .scoreboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .det{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:var(--panel2,rgba(255,255,255,.02))}
+  .det.warn{border-color:var(--warn);background:rgba(245,166,35,.10)}
+  .det.warm{opacity:.55}
+  .det .dh{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+  .det .dn{font-size:12px;color:var(--muted);font-weight:600}
+  .det .db{font-size:10px;font-weight:700;letter-spacing:.4px;padding:2px 7px;border-radius:20px}
+  .det .db.ok{background:rgba(120,200,120,.15);color:#5fae5f}
+  .det .db.on{background:var(--warn);color:#1a1305}
+  .det .db.wu{background:rgba(150,150,150,.15);color:var(--faint)}
+  .det .dv{font-family:var(--mono);font-size:15px;color:var(--txt);font-weight:600}
+  .det .dt{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:2px}
+
   .chart-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap}
   .chart-head h3{font-size:13px;margin:0;color:var(--muted);font-weight:600;letter-spacing:.4px}
   .ranges{display:flex;gap:6px}
@@ -218,6 +231,12 @@
         </div>
         <div class="chart-box"><canvas id="chart"></canvas></div>
       </div>
+    </div>
+
+    <div class="card-panel" id="scorePanel" style="display:none">
+      <h3 style="font-size:13px;color:var(--muted);margin:0 0 4px">탐지기 스코어보드
+        <span style="font-weight:400;color:var(--faint);font-size:11px">— 한 신호에 4개 동시 판정 · 하나라도 발동하면 경고(OR)</span></h3>
+      <div id="scoreboard" class="scoreboard"></div>
     </div>
 
     <div class="card-panel">
@@ -387,6 +406,24 @@ function ensureChart(){
   return true;
 }
 
+function renderScoreboard(dets){
+  const panel=$("#scorePanel"), box=$("#scoreboard");
+  if(!panel||!box) return;
+  if(!dets||!dets.length){ panel.style.display="none"; return; }
+  panel.style.display="";
+  box.innerHTML = dets.map(d=>{
+    const warm=d.warmup, warn=d.warn && !warm;
+    const badge = warm?`<span class="db wu">학습중</span>`
+                : warn?`<span class="db on">발동</span>`
+                :      `<span class="db ok">정상</span>`;
+    return `<div class="det ${warn?'warn':''} ${warm?'warm':''}">
+      <div class="dh"><span class="dn">${d.label||d.method}</span>${badge}</div>
+      <div class="dv">${d.metric??"-"}</div>
+      <div class="dt">임계 ${d.thr??"-"}</div>
+    </div>`;
+  }).join("");
+}
+
 async function loadDetail(){
   if(!DEV) return;
   let st,rd,al;
@@ -412,6 +449,7 @@ async function loadDetail(){
   $("#vsoft").textContent = num(st.soft,1);
   $("#vhard").textContent = num(st.hard,1);
   $("#vdrift").textContent = (st.drift_pct>=0?"+":"")+st.drift_pct+"%";
+  renderScoreboard(st.detectors);
 
   const b=$("#banner");
   if(st.level==="ALARM"){b.className="banner show ALARM";
